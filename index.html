@@ -22,7 +22,8 @@
   .row input { flex: 1; }
   .chips { display: flex; flex-wrap: wrap; gap: 4px; }
   .chip { display: inline-flex; align-items: center; border: 1px solid #4a5075; border-radius: 8px; overflow: hidden; }
-  .chip span { padding: 3px 8px; font-size: 16px; }
+  .chip span { padding: 3px 8px; font-size: 16px; display: inline-flex; align-items: center; }
+  .chip img, .current img { width: 22px; height: 22px; object-fit: contain; }
   .chip button { border: 0; border-radius: 0; background: transparent; font-size: 12px; color: var(--muted); padding: 4px 6px; border-left: 1px solid #4a5075; }
   .presets button { font-size: 12px; padding: 3px 8px; }
   .turn button { font-size: 18px; padding: 1px 12px; }
@@ -35,7 +36,7 @@
 <div id="app"><p class="muted center">Loading…</p></div>
 
 <script type="module">
-import { OBR, DIAL, PRESETS, isDial, mod, createDial, editDial, setDialProps, requestTurn } from "./dial.js";
+import { OBR, DIAL, PRESETS, isDial, isImageSymbol, mod, createDial, editDial, setDialProps, requestTurn } from "./dial.js";
 
 const app = document.getElementById("app");
 let role = "PLAYER";
@@ -43,6 +44,8 @@ let ready = false;
 let dials = [];
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const symHTML = (s) => (isImageSymbol(s) ? `<img src="${esc(s.image.url)}" alt="${esc(s.name || "")}">` : esc(s));
 
 const PLAYER_HELP = `<div class="card help">
   <strong>How to turn a dial</strong>
@@ -53,7 +56,7 @@ const PLAYER_HELP = `<div class="card help">
 function dialCard(item, i) {
   const { symbols, pos } = item.metadata[DIAL];
   const n = symbols.length;
-  const top = n ? esc(symbols[mod(pos, n)]) : "–";
+  const top = n ? symHTML(symbols[mod(pos, n)]) : "–";
   const squares = Math.round(item.width / dpi);
   return `<div class="card">
     <div class="row">
@@ -69,12 +72,15 @@ function dialCard(item, i) {
         ${[2, 3, 4, 5, 6, 8].map((s) => `<option value="${s}" ${s === squares ? "selected" : ""}>${s} squares</option>`).join("")}
       </select>
     </div>
-    <div class="chips">${symbols.map((s, k) => `<span class="chip"><span>${esc(s)}</span>
+    <div class="chips">${symbols.map((s, k) => `<span class="chip"><span>${symHTML(s)}</span>
       <button data-act="del-sym" data-id="${item.id}" data-i="${k}" title="Remove">✕</button></span>`).join("")}
       ${n ? "" : `<span class="small muted">No symbols yet</span>`}</div>
     <div class="row">
-      <input data-focus="add-${item.id}" data-add="${item.id}" placeholder="Add symbols, e.g. 🐉, 💀, A">
+      <input data-focus="add-${item.id}" data-add="${item.id}" placeholder="Add symbols, e.g. 🐉, 💀, A or an image link">
       <button class="primary" data-act="add-sym" data-id="${item.id}">Add</button>
+    </div>
+    <div class="row">
+      <button data-act="add-img" data-id="${item.id}" title="Pick images from your Owlbear assets">🖼 Add image from my Owlbear images</button>
     </div>
     <div class="row presets"><span class="small muted">Fill with:</span>
       ${Object.keys(PRESETS).map((p) => `<button data-act="preset" data-id="${item.id}" data-p="${p}">${PRESETS[p][0]} ${p}</button>`).join("")}
@@ -127,12 +133,43 @@ function restoreFocus(f) {
 
 const dialById = (id) => dials.find((d) => d.id === id);
 
-function addSymbols(id) {
+const MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
+
+// Turn a pasted image link into an image symbol (needs the image's size).
+function imageFromUrl(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const ext = (url.split("?")[0].split(".").pop() || "").toLowerCase();
+      resolve({
+        name: url.split("/").pop().split("?")[0],
+        image: { url, width: img.naturalWidth || 256, height: img.naturalHeight || 256, mime: MIME[ext] || "image/png" },
+      });
+    };
+    img.onerror = () => reject(new Error(url));
+    img.src = url;
+  });
+}
+
+async function addSymbols(id) {
   const input = document.querySelector(`input[data-add="${id}"]`);
   const parts = input.value.split(",").map((s) => s.trim()).filter(Boolean);
   if (!parts.length) return;
   input.value = "";
-  editDial(id, { symbols: [...dialById(id).metadata[DIAL].symbols, ...parts] });
+  const added = [];
+  for (const p of parts) {
+    if (!/^https?:\/\//i.test(p)) { added.push(p); continue; }
+    try { added.push(await imageFromUrl(p)); }
+    catch { OBR.notification.show("Couldn't load that image link. Try uploading it to Owlbear and using 🖼 Add image.", "ERROR"); }
+  }
+  if (added.length) editDial(id, { symbols: [...dialById(id).metadata[DIAL].symbols, ...added] });
+}
+
+async function addImages(id) {
+  const picked = await OBR.assets.downloadImages(true);
+  if (!picked?.length) return;
+  const images = picked.map((p) => ({ name: p.name, image: p.image }));
+  editDial(id, { symbols: [...dialById(id).metadata[DIAL].symbols, ...images] });
 }
 
 app.addEventListener("click", async (e) => {
@@ -152,6 +189,7 @@ app.addEventListener("click", async (e) => {
     case "lock": return setDialProps(id, { locked: !d.locked });
     case "delete": return OBR.scene.items.deleteItems([id]);
     case "add-sym": return addSymbols(id);
+    case "add-img": return addImages(id);
     case "preset": return editDial(id, { symbols: [...PRESETS[btn.dataset.p]] });
     case "del-sym": {
       const symbols = [...d.metadata[DIAL].symbols];

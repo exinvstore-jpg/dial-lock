@@ -1,5 +1,5 @@
 // Shared dial logic used by both the background script and the GM panel.
-import OBR, { buildShape, buildText } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/+esm";
+import OBR, { buildShape, buildText, buildImage } from "https://cdn.jsdelivr.net/npm/@owlbear-rodeo/sdk@3.1.0/+esm";
 
 export { OBR };
 export const ID = "com.dial-lock";
@@ -16,6 +16,9 @@ export const PRESETS = {
   Numbers: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
 };
 
+// A symbol is either a string (text/emoji) or { name, image: { url, width, height, mime } }.
+export const isImageSymbol = (s) => typeof s === "object" && !!s?.image?.url;
+
 export const isDial = (item) => item.type === "SHAPE" && !!item.metadata?.[DIAL];
 export const mod = (a, n) => ((a % n) + n) % n;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -30,19 +33,25 @@ function rot(deg, x, y) {
 const symbolSize = (D, n) => Math.min(D * 0.24, ((2 * Math.PI * D * 0.36) / n) * 0.85);
 const angleFor = (pos, n) => (-pos * 360) / n;
 
-// Position + rotation for every symbol when the dial is turned to `theta` degrees.
+// Center + rotation for every symbol when the dial is turned to `theta` degrees.
 function layout(center, D, n, theta) {
   const r = D * 0.36;
-  const s = symbolSize(D, n);
   return Array.from({ length: n }, (_, i) => {
     const a = (i * 360) / n + theta;
     const p = rot(a, 0, -r);
-    const off = rot(a, s / 2, s / 2); // text items rotate around their top-left corner
-    return { position: { x: center.x + p.x - off.x, y: center.y + p.y - off.y }, rotation: a };
+    return { center: { x: center.x + p.x, y: center.y + p.y }, rotation: a };
   });
 }
 
-function buildParts(body) {
+// Item position for a symbol. Images are anchored at their center; text items
+// rotate around their top-left corner, so shift them back by half a box.
+function symbolPosition(slot, isImage, s) {
+  if (isImage) return slot.center;
+  const off = rot(slot.rotation, s / 2, s / 2);
+  return { x: slot.center.x - off.x, y: slot.center.y - off.y };
+}
+
+function buildParts(body, sceneDpi) {
   const { symbols, pos } = body.metadata[DIAL];
   const D = body.width;
   const C = body.position;
@@ -72,12 +81,19 @@ function buildParts(body) {
     const s = symbolSize(D, n);
     const L = layout(C, D, n, angleFor(pos, n));
     symbols.forEach((sym, i) => {
-      parts.push(part(
-        buildText().plainText(sym).textType("PLAIN").width(s).height(s).padding(0)
-          .fontSize(s * 0.7).textAlign("CENTER").textAlignVertical("MIDDLE")
-          .fillColor("#ffffff").strokeColor("#000000").strokeWidth(Math.max(1, s * 0.04))
-          .position(L[i].position).rotation(L[i].rotation).name(`Dial symbol ${sym}`),
-        "symbol", 3, { index: i }));
+      const img = isImageSymbol(sym);
+      const builder = img
+        ? buildImage(sym.image, {
+            // fit the longest side of the image into ~95% of the symbol box
+            dpi: (Math.max(sym.image.width, sym.image.height) * sceneDpi) / (s * 0.95),
+            offset: { x: sym.image.width / 2, y: sym.image.height / 2 },
+          }).name(`Dial symbol ${sym.name || "image"}`)
+        : buildText().plainText(sym).textType("PLAIN").width(s).height(s).padding(0)
+            .fontSize(s * 0.7).textAlign("CENTER").textAlignVertical("MIDDLE")
+            .fillColor("#ffffff").strokeColor("#000000").strokeWidth(Math.max(1, s * 0.04))
+            .name(`Dial symbol ${sym}`);
+      builder.position(symbolPosition(L[i], img, s)).rotation(L[i].rotation);
+      parts.push(part(builder, "symbol", 3, { index: i }));
     });
   }
 
@@ -97,13 +113,14 @@ export async function getParts(id) {
 }
 
 export async function createDial(center, symbols = PRESETS.Celestial) {
-  const D = (await OBR.scene.grid.getDpi()) * 3;
+  const dpi = await OBR.scene.grid.getDpi();
+  const D = dpi * 3;
   const body = buildShape().shapeType("CIRCLE").width(D).height(D).position(center)
     .fillColor("#3b3f56").strokeColor("#1b1d2b").strokeWidth(D * 0.04)
     .layer("PROP").locked(false).name("Dial").disableAutoZIndex(true).zIndex(Date.now())
     .metadata({ [DIAL]: { symbols: [...symbols], pos: 0 } })
     .build();
-  await OBR.scene.items.addItems([body, ...buildParts(body)]);
+  await OBR.scene.items.addItems([body, ...buildParts(body, dpi)]);
   return body.id;
 }
 
@@ -117,7 +134,8 @@ export async function editDial(id, { symbols, squares } = {}) {
     data.symbols = symbols;
     data.pos = symbols.length ? Math.min(cur, symbols.length - 1) : 0;
   }
-  const D = squares ? (await OBR.scene.grid.getDpi()) * squares : body.width;
+  const dpi = await OBR.scene.grid.getDpi();
+  const D = squares ? dpi * squares : body.width;
   await OBR.scene.items.updateItems([id], ([d]) => {
     d.metadata[DIAL] = data;
     d.width = D;
@@ -127,7 +145,7 @@ export async function editDial(id, { symbols, squares } = {}) {
   const [fresh] = await OBR.scene.items.getItems([id]);
   const old = await getParts(id);
   await OBR.scene.items.deleteItems(old.map((p) => p.id));
-  await OBR.scene.items.addItems(buildParts(fresh));
+  await OBR.scene.items.addItems(buildParts(fresh, dpi));
 }
 
 export async function setDialProps(id, { visible, locked, name }) {
@@ -161,14 +179,15 @@ async function doTurn(id, delta) {
   await OBR.scene.items.updateItems([id], ([d]) => { d.metadata[DIAL] = { ...data, pos: to }; });
 
   const ids = (await getParts(id)).filter((p) => p.metadata[PART].kind === "symbol").map((p) => p.id);
+  const s = symbolSize(body.width, n);
   const FRAMES = 5;
   for (let f = 1; f <= FRAMES; f++) {
     const L = layout(body.position, body.width, n, angleFor(from + (to - from) * ease(f / FRAMES), n));
     await OBR.scene.items.updateItems(ids, (drafts) => {
       for (const d of drafts) {
-        const k = d.metadata[PART].index;
-        d.position = L[k].position;
-        d.rotation = L[k].rotation;
+        const slot = L[d.metadata[PART].index];
+        d.position = symbolPosition(slot, d.type === "IMAGE", s);
+        d.rotation = slot.rotation;
       }
     });
     if (f < FRAMES) await sleep(30);
