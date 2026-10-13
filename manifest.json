@@ -1,14 +1,15 @@
 {
   "name": "Dial Lock",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "manifest_version": 1,
   "description": "Rotating symbol dials you can place on the map. Players turn them with the Dial tool.",
   "author": "Dial Lock",
-  "background_url": "background.html",
+  "icon": "/dial-lock/icon.svg",
+  "background_url": "/dial-lock/background.html",
   "action": {
     "title": "Dial Lock",
-    "icon": "icon.svg",
-    "popover": "index.html",
+    "icon": "/dial-lock/icon.svg",
+    "popover": "/dial-lock/index.html",
     "width": 380,
     "height": 600
   }
