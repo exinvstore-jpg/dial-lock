@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Dial Lock background</title></head>
+<body>
+<script type="module">
+import { OBR, ID, TURN, DIAL, isDial, turn, requestTurn, isPrimaryGM } from "./dial.js";
+
+const icon = new URL("icon.svg", location.href).href;
+const TOOL = `${ID}/tool`;
+const MODE = `${ID}/turn-mode`;
+
+OBR.onReady(() => {
+  // The GM performs every turn request.
+  OBR.broadcast.onMessage(TURN, async ({ data }) => {
+    if (await isPrimaryGM()) turn(data.id, data.delta);
+  });
+
+  // "Dial" tool: click the left half of a dial to turn it left, the right half to turn it right.
+  OBR.tool.create({
+    id: TOOL,
+    icons: [{ icon, label: "Dial" }],
+    defaultMode: MODE,
+  });
+  OBR.tool.createMode({
+    id: MODE,
+    icons: [{ icon, label: "Turn a dial", filter: { activeTools: [TOOL] } }],
+    cursors: [{ cursor: "pointer" }],
+    async onToolClick(_context, event) {
+      const pt = event.pointerPosition;
+      const dials = await OBR.scene.items.getItems(isDial);
+      let best = null;
+      let bestDist = Infinity;
+      for (const d of dials) {
+        const r = (d.width * d.scale.x) / 2;
+        const dist = Math.hypot(pt.x - d.position.x, pt.y - d.position.y);
+        if (dist <= r * 1.2 && dist < bestDist) { best = d; bestDist = dist; }
+      }
+      if (best) requestTurn(best.id, pt.x < best.position.x ? 1 : -1);
+    },
+  });
+
+  // Right-click menu on a selected dial (handy for the GM).
+  const onlyDials = { max: 1, every: [{ key: ["metadata", DIAL], value: undefined, operator: "!=" }] };
+  OBR.contextMenu.create({
+    id: `${ID}/turn-left`,
+    icons: [{ icon, label: "Turn dial left", filter: onlyDials }],
+    onClick: (ctx) => requestTurn(ctx.items[0].id, 1),
+  });
+  OBR.contextMenu.create({
+    id: `${ID}/turn-right`,
+    icons: [{ icon, label: "Turn dial right", filter: onlyDials }],
+    onClick: (ctx) => requestTurn(ctx.items[0].id, -1),
+  });
+});
+</script>
+</body>
+</html>

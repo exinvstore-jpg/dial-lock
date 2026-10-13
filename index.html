@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dial Lock</title>
+<style>
+  :root { --bg: #222639; --card: #2c3047; --card2: #353a55; --text: #e8e6f0; --muted: #9a9ab5; --accent: #bb99ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  #app { padding: 12px; display: grid; gap: 10px; }
+  button, select { font: inherit; color: var(--text); background: var(--card2); border: 1px solid #4a5075; border-radius: 8px; padding: 5px 9px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #1b1d2b; border-color: var(--accent); font-weight: 600; }
+  input { font: inherit; color: var(--text); background: #1b1e2e; border: 1px solid #4a5075; border-radius: 8px; padding: 5px 8px; min-width: 0; }
+  input:focus { outline: none; border-color: var(--accent); }
+  .muted { color: var(--muted); }
+  .small { font-size: 12px; }
+  .center { text-align: center; }
+  .card { background: var(--card); border-radius: 12px; padding: 10px; display: grid; gap: 8px; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .row input { flex: 1; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip { display: inline-flex; align-items: center; border: 1px solid #4a5075; border-radius: 8px; overflow: hidden; }
+  .chip span { padding: 3px 8px; font-size: 16px; }
+  .chip button { border: 0; border-radius: 0; background: transparent; font-size: 12px; color: var(--muted); padding: 4px 6px; border-left: 1px solid #4a5075; }
+  .presets button { font-size: 12px; padding: 3px 8px; }
+  .turn button { font-size: 18px; padding: 1px 12px; }
+  .current { font-size: 20px; min-width: 30px; text-align: center; }
+  .spacer { flex: 1; }
+  .help { font-size: 13px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div id="app"><p class="muted center">Loading…</p></div>
+
+<script type="module">
+import { OBR, DIAL, PRESETS, isDial, mod, createDial, editDial, setDialProps, requestTurn } from "./dial.js";
+
+const app = document.getElementById("app");
+let role = "PLAYER";
+let ready = false;
+let dials = [];
+
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const PLAYER_HELP = `<div class="card help">
+  <strong>How to turn a dial</strong>
+  <div>1. Pick the <b>Dial</b> tool in the toolbar on the left.</div>
+  <div>2. Click the <b>left half</b> of a dial to turn it left, or the <b>right half</b> to turn it right.</div>
+</div>`;
+
+function dialCard(item, i) {
+  const { symbols, pos } = item.metadata[DIAL];
+  const n = symbols.length;
+  const top = n ? esc(symbols[mod(pos, n)]) : "–";
+  const squares = Math.round(item.width / dpi);
+  return `<div class="card">
+    <div class="row">
+      <input data-focus="name-${item.id}" data-name="${item.id}" value="${esc(item.name)}" placeholder="Dial ${i + 1}">
+      <button data-act="find" data-id="${item.id}" title="Show on map">🔍</button>
+    </div>
+    <div class="row turn">
+      <button data-act="turn" data-id="${item.id}" data-d="1" title="Turn left">⟲</button>
+      <span class="current">${top}</span>
+      <button data-act="turn" data-id="${item.id}" data-d="-1" title="Turn right">⟳</button>
+      <span class="spacer"></span>
+      <select data-size="${item.id}" title="Size in grid squares">
+        ${[2, 3, 4, 5, 6, 8].map((s) => `<option value="${s}" ${s === squares ? "selected" : ""}>${s} squares</option>`).join("")}
+      </select>
+    </div>
+    <div class="chips">${symbols.map((s, k) => `<span class="chip"><span>${esc(s)}</span>
+      <button data-act="del-sym" data-id="${item.id}" data-i="${k}" title="Remove">✕</button></span>`).join("")}
+      ${n ? "" : `<span class="small muted">No symbols yet</span>`}</div>
+    <div class="row">
+      <input data-focus="add-${item.id}" data-add="${item.id}" placeholder="Add symbols, e.g. 🐉, 💀, A">
+      <button class="primary" data-act="add-sym" data-id="${item.id}">Add</button>
+    </div>
+    <div class="row presets"><span class="small muted">Fill with:</span>
+      ${Object.keys(PRESETS).map((p) => `<button data-act="preset" data-id="${item.id}" data-p="${p}">${PRESETS[p][0]} ${p}</button>`).join("")}
+    </div>
+    <div class="row">
+      <button data-act="visible" data-id="${item.id}">${item.visible ? "👁 Visible" : "🙈 Hidden"}</button>
+      <button data-act="lock" data-id="${item.id}">${item.locked ? "🔒 Locked in place" : "🔓 Movable"}</button>
+      <span class="spacer"></span>
+      <button data-act="delete" data-id="${item.id}" title="Delete dial">🗑</button>
+    </div>
+  </div>`;
+}
+
+let dpi = 150;
+
+function render() {
+  const f = saveFocus();
+  if (!OBR.isAvailable) {
+    app.innerHTML = `<p class="muted center">Open this inside Owlbear Rodeo.</p>`;
+    return;
+  }
+  if (!ready) {
+    app.innerHTML = `<p class="muted center">Open a scene to use dials.</p>`;
+    return;
+  }
+  if (role !== "GM") {
+    app.innerHTML = PLAYER_HELP;
+    return;
+  }
+  app.innerHTML = `
+    <button class="primary" data-act="new">＋ Place a new dial</button>
+    ${dials.length ? "" : `<p class="small muted center">No dials in this scene yet.</p>`}
+    ${dials.map(dialCard).join("")}
+    <p class="small muted">Drag a dial on the map while it's 🔓 movable, then lock it so players can't move it.
+    Players turn dials with the <b>Dial</b> tool in the toolbar.</p>`;
+  restoreFocus(f);
+}
+
+function saveFocus() {
+  const a = document.activeElement;
+  if (a?.dataset?.focus) return { k: a.dataset.focus, v: a.value, s: a.selectionStart, e: a.selectionEnd };
+}
+function restoreFocus(f) {
+  const el = f && document.querySelector(`[data-focus="${f.k}"]`);
+  if (!el) return;
+  el.value = f.v;
+  el.focus();
+  try { el.setSelectionRange(f.s, f.e); } catch {}
+}
+
+const dialById = (id) => dials.find((d) => d.id === id);
+
+function addSymbols(id) {
+  const input = document.querySelector(`input[data-add="${id}"]`);
+  const parts = input.value.split(",").map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return;
+  input.value = "";
+  editDial(id, { symbols: [...dialById(id).metadata[DIAL].symbols, ...parts] });
+}
+
+app.addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  const d = id && dialById(id);
+  switch (btn.dataset.act) {
+    case "new": {
+      const [w, h] = await Promise.all([OBR.viewport.getWidth(), OBR.viewport.getHeight()]);
+      const center = await OBR.viewport.inverseTransformPoint({ x: w / 2, y: h / 2 });
+      return createDial(center);
+    }
+    case "turn": return requestTurn(id, Number(btn.dataset.d));
+    case "find": return OBR.viewport.animateToBounds(await OBR.scene.items.getItemBounds([id]));
+    case "visible": return setDialProps(id, { visible: !d.visible });
+    case "lock": return setDialProps(id, { locked: !d.locked });
+    case "delete": return OBR.scene.items.deleteItems([id]);
+    case "add-sym": return addSymbols(id);
+    case "preset": return editDial(id, { symbols: [...PRESETS[btn.dataset.p]] });
+    case "del-sym": {
+      const symbols = [...d.metadata[DIAL].symbols];
+      symbols.splice(Number(btn.dataset.i), 1);
+      return editDial(id, { symbols });
+    }
+  }
+});
+
+app.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+  if (e.target.dataset.add) addSymbols(e.target.dataset.add);
+  if (e.target.dataset.name) e.target.blur();
+});
+
+app.addEventListener("change", (e) => {
+  const t = e.target;
+  if (t.dataset.name) setDialProps(t.dataset.name, { name: t.value.trim() || "Dial" });
+  if (t.dataset.size) editDial(t.dataset.size, { squares: Number(t.value) });
+});
+
+async function refresh() {
+  ready = await OBR.scene.isReady();
+  if (ready) {
+    dpi = await OBR.scene.grid.getDpi();
+    dials = (await OBR.scene.items.getItems(isDial)).sort((a, b) => a.zIndex - b.zIndex);
+  } else {
+    dials = [];
+  }
+  render();
+}
+
+if (OBR.isAvailable) {
+  OBR.onReady(async () => {
+    role = await OBR.player.getRole();
+    await refresh();
+    OBR.scene.onReadyChange(refresh);
+    OBR.scene.items.onChange((items) => {
+      const next = items.filter(isDial).sort((a, b) => a.zIndex - b.zIndex);
+      if (JSON.stringify(next) === JSON.stringify(dials)) return;
+      dials = next;
+      render();
+    });
+    OBR.player.onChange((p) => { if (p.role !== role) { role = p.role; render(); } });
+  });
+} else {
+  render();
+}
+</script>
+</body>
+</html>
